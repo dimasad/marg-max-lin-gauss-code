@@ -15,6 +15,13 @@ import scipy.linalg
 jax.config.update("jax_enable_x64", True)
 
 
+class Problem:
+
+    def __init__(self, nx, nu, y):
+        pass
+
+
+
 def load_data():
     # Retrieve data
     d2r = np.pi / 180
