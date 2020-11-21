@@ -47,15 +47,9 @@ def dare_bwd(fwd_vars, out_grad):
     return (a_grad, b_grad, q_grad, r_grad)
 
 
-@jax.custom_jvp
-@partial(jnp.vectorize, signature='(m,m),(m,n),(m,m),(n,n)->(m,m)')
 def dare(a, b, q, r):
     """JAX-traceable solution to Discrete Algebraic Ricatti Equation."""
     return dare_prim.bind(a, b, q, r)
-
-
-# Define reverse differentiation functions
-# dare.defvjp(dare_fwd, dare_bwd)
 
 
 def dare_impl(a, b, q, r):
@@ -63,22 +57,27 @@ def dare_impl(a, b, q, r):
   return scipy.linalg.solve_discrete_are(a, b, q, r)
 
 
-@dare.defjvp
 def dare_jvp(values, tangents):
     p = dare(*values)
     residue_values = values + (p,)
-    residue_tangents = tangents + (jnp.zeros_like(p),)
+    residue_tangents = make_zeros(values, tangents) + (jnp.zeros_like(p),)
     residue, r_tan = jax.jvp(dare_residue, residue_values, residue_tangents)
     dr_dp = jax.jacobian(dare_residue, -1)(*residue_values)
     p_tan = jnp.linalg.tensorsolve(dr_dp, -r_tan)
     return (p, p_tan)
 
+
 dare_prim = jax.core.Primitive("dare")
 """Discrete Algebraic Ricatti Equation jax primitive."""
 
 dare_prim.def_impl(dare_impl)
-#jax.interpreters.ad.primitive_jvps[dare_prim] = dare_jvp
+jax.interpreters.ad.primitive_jvps[dare_prim] = dare_jvp
 
+
+def make_zeros(vals, tans):
+    zero = jax.interpreters.ad.zero
+    gen = (jnp.zeros_like(v) if t is zero else t for v,t in zip(vals,tans))
+    return tuple(gen)
 
 
 if __name__ == '__main__':
@@ -88,3 +87,5 @@ if __name__ == '__main__':
     R = np.diag([0.5, 0.1])
     
     P = dare(A, B, Q, R)
+    jax.jacfwd(dare)(A, B, Q, R)
+    jax.jacrev(dare)(A, B, Q, R)
