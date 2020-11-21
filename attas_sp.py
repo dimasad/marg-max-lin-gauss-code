@@ -125,11 +125,12 @@ class Problem:
         xnext = x[1:]
         w = xnext - xprev @ A.T - uprev @ B.T
         e = y - x @ C.T - u @ D.T
-        
+
         lprior = normal_logpdf(w, v.lsQd)
         llike = normal_logpdf(e, v.lsRd)
+        ldmarg = logdet_marg(A, C, v.lsQd, v.lsRd, self.N)
         
-        return lprior + llike
+        return lprior + llike + ldmarg
 
 
 def normal_logpdf(x, logsigma):
@@ -138,6 +139,42 @@ def normal_logpdf(x, logsigma):
     inv_sigma2 = jnp.exp(-2 * logsigma)
     sigma_factor = - N * jnp.sum(logsigma)
     return -0.5 * jnp.sum(jnp.sum(x ** 2, axis=0) * inv_sigma2) + sigma_factor
+
+
+def logdet_marg(A, C, lsQd, lsRd, N):
+    # Assemble the input matrices
+    sQd = jnp.exp(lsQd)
+    sRd = jnp.exp(lsRd)
+    Qd = sQd ** 2
+    Rd = sRd ** 2
+    sQ = jnp.diag(sQd)
+    sR = jnp.diag(sRd)
+    Q = jnp.diag(Qd)
+    R = jnp.diag(Rd)
+    
+    Pp = riccati.dare(A.T, C.T, Q, R)
+    
+    nx = len(A)
+    ny = len(C)
+    z = jnp.zeros_like(C.T)
+    sPp = jnp.linalg.cholesky(Pp)
+    corr_mat = jnp.block([[sR, C @ sPp],
+                          [z,   sPp]])
+    q, r = jnp.linalg.qr(corr_mat.T)
+    s = jnp.sign(r.diagonal())
+    sPc = (r.T * s)[ny:, ny:]
+    
+    z = jnp.zeros_like(A)
+    pred_mat = jnp.block([[A @ sPc, sQ],
+                          [sPc,     z]])
+    q, r = jnp.linalg.qr(pred_mat.T)
+    s = jnp.sign(r.diagonal())
+    sPr = (r.T * s)[nx:, nx:]
+    
+    eps = 1e-40
+    log_det_sPc = jnp.sum(jnp.log(jnp.abs(sPc.diagonal()) + eps))
+    log_det_sPr = jnp.sum(jnp.log(jnp.abs(sPr.diagonal()) + eps))
+    return (N-1) * log_det_sPr + log_det_sPc
 
 
 def load_data():
@@ -183,7 +220,8 @@ if __name__ == '__main__':
     obj = lambda x: -problem.merit(x)
     grad = jax.grad(obj)
     hessp = lambda x, p: jax.jvp(grad, (x,), (p,))[1]
-
+    #hessp = lambda x, p: jax.grad(lambda x: jnp.vdot(grad(x), p))(x)
+    
     opt = {'gtol': 1e-6, 'disp': True, 'maxiter': 200}
     sol = optimize.minimize(
         obj, dvec0, method='trust-krylov', jac=grad, hessp=hessp, options=opt
