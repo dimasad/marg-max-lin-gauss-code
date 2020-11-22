@@ -79,7 +79,7 @@ class Problem:
         """Number of measurement instants."""
 
         # Register decision variables
-        self.add_decision('x', (N, nx))        
+        self.add_decision('en', (N, nx))
         self.add_decision('A', (nx, nx))
         self.add_decision('B', (nx, self.nu))
         self.add_decision('lsQd', nx)
@@ -103,22 +103,26 @@ class Problem:
             dvec = np.zeros(self.ndec)
         
         for name, value in dvars.items():
-            spec = self.dec_specs[name]
-            spec.pack(dvec, value)
+            spec = self.dec_specs.get(name)
+            if spec is not None:
+                spec.pack(dvec, value)
         
         return dvec
 
     def merit(self, dvec):
         v = self.unpack_decision(dvec)
-        x = v.x
+        en = v.en
         A = v.A
         B = v.B
-
+        
         u = self.u
         y = self.y
         
         C = jnp.identity(self.nx)
         D = jnp.zeros((self.ny, self.nu))
+        
+        e = en * jnp.exp(v.lsRd)
+        x = y - e
         
         xprev = x[:-1]
         uprev = u[:-1]
@@ -127,7 +131,7 @@ class Problem:
         e = y - x @ C.T - u @ D.T
 
         lprior = normal_logpdf(w, v.lsQd)
-        llike = normal_logpdf(e, v.lsRd)
+        llike = normal_logpdf2(en, v.lsRd)
         ldmarg = logdet_marg(A, C, v.lsQd, v.lsRd, self.N)
         
         return lprior + llike + ldmarg
@@ -139,6 +143,13 @@ def normal_logpdf(x, logsigma):
     inv_sigma2 = jnp.exp(-2 * logsigma)
     sigma_factor = - N * jnp.sum(logsigma)
     return -0.5 * jnp.sum(jnp.sum(x ** 2, axis=0) * inv_sigma2) + sigma_factor
+
+
+def normal_logpdf2(xn, logsigma):
+    """Unnormalized normal distribution logpdf."""
+    N = len(xn)
+    sigma_factor = - N * jnp.sum(logsigma)
+    return -0.5 * jnp.sum(xn ** 2) + sigma_factor
 
 
 def logdet_marg(A, C, lsQd, lsRd, N):
@@ -213,14 +224,13 @@ if __name__ == '__main__':
     B0 = np.zeros((2, 1))
     lsQd0 = np.array([-1, -1])
     lsRd0 = np.array([-1, -1])
-    dvar0 = dict(x=x0, A=A0, B=B0, lsQd=lsQd0, lsRd=lsRd0)
+    dvar0 = dict(A=A0, B=B0, lsQd=lsQd0, lsRd=lsRd0)
     dvec0 = problem.pack_decision(dvar0)
 
     # Define optimization functions
     obj = lambda x: -problem.merit(x)
     grad = jax.grad(obj)
     hessp = lambda x, p: jax.jvp(grad, (x,), (p,))[1]
-    #hessp = lambda x, p: jax.grad(lambda x: jnp.vdot(grad(x), p))(x)
     
     opt = {'gtol': 1e-6, 'disp': True, 'maxiter': 200}
     sol = optimize.minimize(
@@ -229,12 +239,16 @@ if __name__ == '__main__':
     varopt = problem.unpack_decision(sol.x)
     vargrad = problem.unpack_decision(sol.jac)
     
-    x = varopt.x
     A = varopt.A
     B = varopt.B
     lsQd = varopt.lsQd
     lsRd = varopt.lsRd
-
+    en = varopt.en
+    
+    sRd = np.exp(lsRd)
+    e = en * sRd
+    x = y - e
+    
     xsim = np.zeros_like(x)
     xsim[0] = x[0]
     for i in range(1, len(x)):
