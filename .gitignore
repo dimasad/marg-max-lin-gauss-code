@@ -1,5 +1,6 @@
-# Ignore the script of test computations
+# Ignore the scripts of test computations
 scratch.py
+scratch?.py
 
 # Ignore the data directory
 data/

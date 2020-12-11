@@ -1,4 +1,4 @@
-"""Tests with the ATTAS aircraft short-period mode estimation."""
+"""ATTAS aircraft short-period mode estimation --- Traditional PEM/FEM."""
 
 
 import collections
@@ -79,7 +79,7 @@ class Problem:
         """Number of measurement instants."""
 
         # Register decision variables
-        self.add_decision('en', (N, nx))
+        self.add_decision('x0', nx)
         self.add_decision('A', (nx, nx))
         self.add_decision('B', (nx, self.nu))
         self.add_decision('lsQd', nx)
@@ -111,81 +111,53 @@ class Problem:
 
     def merit(self, dvec):
         v = self.unpack_decision(dvec)
-        en = v.en
         A = v.A
         B = v.B
-        
+
         u = self.u
         y = self.y
         
         C = jnp.identity(self.nx)
         D = jnp.zeros((self.ny, self.nu))
         
-        e = en * jnp.exp(v.lsRd)
-        x = y - e
+        sQd = jnp.exp(v.lsQd)
+        sRd = jnp.exp(v.lsRd)
+        Qd = sQd ** 2
+        Rd = sRd ** 2
+        sQ = jnp.diag(sQd)
+        sR = jnp.diag(sRd)
+        Q = jnp.diag(Qd)
+        R = jnp.diag(Rd)
+
+        Pp = riccati.dare(A.T, C.T, Q, R)
+        sPp = jnp.linalg.cholesky(Pp)
         
-        xprev = x[:-1]
-        uprev = u[:-1]
-        xnext = x[1:]
-        w = xnext - xprev @ A.T - uprev @ B.T
-        e = y - x @ C.T - u @ D.T
+        nx = len(A)
+        ny = len(C)
+        N = len(y)
+
+        # Kailath Eq. (12.3.8)
+        z = jnp.zeros_like(C.T)
+        corr_mat = jnp.block([[sR, C @ sPp],
+                              [z,   sPp]])
+        q, r = jnp.linalg.qr(corr_mat.T)
+        s = jnp.sign(r.diagonal())
+        sRp = (r.T * s)[:ny, :ny]
+        sPc = (r.T * s)[ny:, ny:]
+        Kn = (r.T * s)[ny:, :ny]
         
-        lprior = normal_logpdf(w, v.lsQd)
-        llike = normal_logpdf2(en, v.lsRd)
-        ldmarg = logdet_marg(A, C, v.lsQd, v.lsRd, self.N)
-
-        return lprior + llike + ldmarg
-
-
-def normal_logpdf(x, logsigma):
-    """Unnormalized normal distribution logpdf."""
-    N = len(x)
-    inv_sigma2 = jnp.exp(-2 * logsigma)
-    sigma_factor = - N * jnp.sum(logsigma)
-    return -0.5 * jnp.sum(jnp.sum(x ** 2, axis=0) * inv_sigma2) + sigma_factor
-
-
-def normal_logpdf2(xn, logsigma):
-    """Unnormalized normal distribution logpdf."""
-    N = len(xn)
-    sigma_factor = - N * jnp.sum(logsigma)
-    return -0.5 * jnp.sum(xn ** 2) + sigma_factor
-
-
-def logdet_marg(A, C, lsQd, lsRd, N):
-    # Assemble the input matrices
-    sQd = jnp.exp(lsQd)
-    sRd = jnp.exp(lsRd)
-    Qd = sQd ** 2
-    Rd = sRd ** 2
-    sQ = jnp.diag(sQd)
-    sR = jnp.diag(sRd)
-    Q = jnp.diag(Qd)
-    R = jnp.diag(Rd)
-    
-    Pp = riccati.dare(A.T, C.T, Q, R)
-    
-    nx = len(A)
-    ny = len(C)
-    z = jnp.zeros_like(C.T)
-    sPp = jnp.linalg.cholesky(Pp)
-    corr_mat = jnp.block([[sR, C @ sPp],
-                          [z,   sPp]])
-    q, r = jnp.linalg.qr(corr_mat.T)
-    s = jnp.sign(r.diagonal())
-    sPc = (r.T * s)[ny:, ny:]
-    
-    z = jnp.zeros_like(A)
-    pred_mat = jnp.block([[A @ sPc, sQ],
-                          [sPc,     z]])
-    q, r = jnp.linalg.qr(pred_mat.T)
-    s = jnp.sign(r.diagonal())
-    sPr = (r.T * s)[nx:, nx:]
-    
-    eps = 1e-40
-    log_det_sPc = jnp.sum(jnp.log(jnp.abs(sPc.diagonal()) + eps))
-    log_det_sPr = jnp.sum(jnp.log(jnp.abs(sPr.diagonal()) + eps))
-    return (N-1) * log_det_sPr + log_det_sPc
+        x = v.x0
+        loglike = -N * jnp.log(sRp.diagonal()).sum()
+        for k in range(len(y)):
+            e = y[k]  - (C @ x + D @ u[k])
+            en = jnp.linalg.solve(sRp, e)            
+            
+            loglike = loglike - 0.5 * jnp.sum(en ** 2)
+            
+            xcorr = x + Kn @ en
+            x = A @ xcorr + B @ u[k]
+        
+        return loglike
 
 
 def load_data():
@@ -223,13 +195,11 @@ if __name__ == '__main__':
     t, u, y, yshift, yscale, ushift, uscale = load_data()
     problem = Problem(nx, u, y)
     
-    x0 = y
-    en0 = np.random.randn(*y.shape)
-    A0 = np.diag([0.9, 0.9])
-    B0 = np.zeros((2, 1))
-    lsQd0 = np.array([-1, -1])
-    lsRd0 = np.array([-5, -5])
-    dvar0 = dict(en=en0, A=A0, B=B0, lsQd=lsQd0, lsRd=lsRd0)
+    A0 = np.array([[0.92, -0.097], [0.0831, 0.977]])
+    B0 = np.array([[-0.11], [0.015]])
+    lsQd0 = np.array([-4.3, -4.9])
+    lsRd0 = np.array([-5.4, -4.4])
+    dvar0 = dict(A=A0, B=B0, lsQd=lsQd0, lsRd=lsRd0)
     dvec0 = problem.pack_decision(dvar0)
 
     # Define optimization functions
@@ -248,13 +218,12 @@ if __name__ == '__main__':
     B = varopt.B
     lsQd = varopt.lsQd
     lsRd = varopt.lsRd
-    en = varopt.en
+    x0 = varopt.x0
     
     sRd = np.exp(lsRd)
-    e = en * sRd
-    x = y - e
+    sQd = np.exp(lsQd)
     
-    xsim = np.zeros_like(x)
-    xsim[0] = x[0]
-    for i in range(1, len(x)):
+    xsim = np.zeros_like(y)
+    xsim[0] = x0
+    for i in range(1, len(y)):
         xsim[i] = A @ xsim[i-1] + B @ u[i - 1]
